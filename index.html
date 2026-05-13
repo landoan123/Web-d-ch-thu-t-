@@ -727,6 +727,9 @@ recognition && (recognition.onstart = () => {
 });
 
 recognition && (recognition.onresult = (event) => {
+  // Bỏ qua kết quả khi TTS đang phát — tránh micro bắt âm loa
+  if (ttsActive) return;
+
   // Build lai tu dau de tranh trung lap khi resultIndex bi lech
   let sessionFinal = '';
   let interim      = '';
@@ -1014,16 +1017,13 @@ async function translateText(text) {
     const r = await fetch(url, { signal: AbortSignal.timeout(8000) });
     const data = await r.json();
     const translated = data[0].map(item => item[0]).filter(Boolean).join('');
-    if (translated) {
-      translatedDisplay.textContent = translated;
-      updateEngine('google-direct');
+    if (setResult(translated, 'google-direct')) {
       showAutoNouns(detectProperNouns(text, translated));
-      if (autoTTS) speakText(translated, targetLangSel.value);
       return;
     }
   } catch(e) { console.warn('Google direct failed:', e); }
 
-  // 3) MyMemory trực tiếp
+  // 3) MyMemory backup
   try {
     const r = await fetch(
       `https://api.mymemory.translated.net/get?q=${encodeURIComponent(text)}&langpair=${srcCode}|${tgtCode}`,
@@ -1032,14 +1032,13 @@ async function translateText(text) {
     const data = await r.json();
     const translated = data?.responseData?.translatedText;
     if (translated && translated.toUpperCase() !== 'INVALID LANGUAGE PAIR') {
-      translatedDisplay.textContent = translated;
-      updateEngine('mymemory-direct');
-      if (autoTTS) speakText(translated, targetLangSel.value);
-      return;
+      if (setResult(translated, 'mymemory-direct')) return;
     }
   } catch(e) { console.warn('MyMemory direct failed:', e); }
 
-  translatedDisplay.innerHTML = '<span style="color:var(--red)">❌ Không dịch được. Kiểm tra kết nối internet.</span>';
+  if (!isStale()) {
+    translatedDisplay.innerHTML = '<span style="color:var(--red)">❌ Không dịch được. Kiểm tra kết nối internet.</span>';
+  }
 }
 
 // ─── TTS (TEXT-TO-SPEECH) ────────────────────────────────────
@@ -1062,9 +1061,11 @@ function getTTSLang(code) {
   return map[code] || code;
 }
 
+let ttsActive = false; // cờ ngăn feedback micro ← loa
+
 function speakText(text, langCode) {
   if (!window.speechSynthesis) return;
-  window.speechSynthesis.cancel(); // dừng bất kỳ TTS đang chạy
+  window.speechSynthesis.cancel();
 
   const utter = new SpeechSynthesisUtterance(text);
   utter.lang = getTTSLang(langCode);
@@ -1073,14 +1074,29 @@ function speakText(text, langCode) {
   utter.volume = 1;
 
   utter.onstart = () => {
+    ttsActive = true;
+    // Dừng recognition ngay khi TTS bắt đầu — ngăn micro bắt âm loa
+    if (isRecording) {
+      clearSilenceCountdown();
+      clearTimeout(translateTimer);
+      try { recognition && recognition.stop(); } catch(e) {}
+    }
     ttsIndicator.classList.add('active');
     speakBtn.classList.add('speaking');
     speakBtn.textContent = '⏹ Dừng';
   };
+
   utter.onend = utter.onerror = () => {
+    ttsActive = false;
     ttsIndicator.classList.remove('active');
     speakBtn.classList.remove('speaking');
     speakBtn.textContent = '🔊 Phát';
+    // Khởi động lại recognition sau khi loa im hẳn
+    if (isRecording) {
+      setTimeout(() => {
+        try { recognition && recognition.start(); } catch(e) {}
+      }, 300);
+    }
   };
 
   window.speechSynthesis.speak(utter);
