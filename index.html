@@ -745,10 +745,8 @@ recognition && (recognition.onresult = (event) => {
   // Hien thi nguon
   sourceDisplay.textContent = accumulatedFinal + (interim ? ' ' + interim : '');
 
-  // Mỗi khi có speech → reset countdown
-  if (interim) {
-    clearSilenceCountdown();
-  }
+  // Reset countdown bất kể là interim hay final để tránh đếm tiếp khi đang nói
+  clearSilenceCountdown();
 
   // Debounce dịch
   clearTimeout(translateTimer);
@@ -1096,7 +1094,16 @@ function speakText(text, langCode) {
   window.speechSynthesis.cancel();
 
   const utter = new SpeechSynthesisUtterance(text);
-  utter.lang = getTTSLang(langCode);
+  const bcpLang = getTTSLang(langCode);
+  utter.lang = bcpLang;
+  
+  // Bắt buộc chọn voice theo ngôn ngữ để tránh trình duyệt tự dùng tiếng Anh
+  const voices = window.speechSynthesis.getVoices();
+  const lowerLang = bcpLang.toLowerCase();
+  const voice = voices.find(v => v.lang.toLowerCase() === lowerLang) 
+             || voices.find(v => v.lang.toLowerCase().startsWith(lowerLang.split('-')[0]));
+  if (voice) utter.voice = voice;
+
   utter.rate = 0.95;
   utter.pitch = 1;
   utter.volume = 1;
