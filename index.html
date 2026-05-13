@@ -1056,6 +1056,16 @@ function getTTSLang(code) {
 
 let ttsActive = false;   // cờ ngăn feedback micro ← loa
 let ttsCountdownTimer = null; // countdown trước khi phát
+let googleAudio = null;  // fallback audio
+
+function stopAllAudio() {
+  if (window.speechSynthesis) window.speechSynthesis.cancel();
+  if (googleAudio) {
+    googleAudio.pause();
+    googleAudio = null;
+    ttsActive = false;
+  }
+}
 
 function cancelTTSCountdown() {
   clearTimeout(ttsCountdownTimer);
@@ -1090,27 +1100,33 @@ function speakTextWithDelay(text, langCode, delay = 2) {
 }
 
 function speakText(text, langCode) {
-  if (!window.speechSynthesis) return;
-  window.speechSynthesis.cancel();
+  stopAllAudio();
 
-  const utter = new SpeechSynthesisUtterance(text);
   const bcpLang = getTTSLang(langCode);
-  utter.lang = bcpLang;
-  
-  // Bắt buộc chọn voice theo ngôn ngữ để tránh trình duyệt tự dùng tiếng Anh
-  const voices = window.speechSynthesis.getVoices();
+  const voices = window.speechSynthesis ? window.speechSynthesis.getVoices() : [];
   const lowerLang = bcpLang.toLowerCase();
+  const langPrefix = lowerLang.split('-')[0];
+  
   const voice = voices.find(v => v.lang.toLowerCase() === lowerLang) 
-             || voices.find(v => v.lang.toLowerCase().startsWith(lowerLang.split('-')[0]));
-  if (voice) utter.voice = voice;
+             || voices.find(v => v.lang.toLowerCase().startsWith(langPrefix));
 
+  // NẾU TRÌNH DUYỆT KHÔNG CÓ GIỌNG NÀY (VD: Tiếng Việt trên Windows Chrome)
+  // → Fallback dùng Google Translate Audio API
+  if (voices.length > 0 && !voice) {
+    playGoogleAudioFallback(text, langPrefix);
+    return;
+  }
+
+  if (!window.speechSynthesis) return;
+  const utter = new SpeechSynthesisUtterance(text);
+  utter.lang = bcpLang;
+  if (voice) utter.voice = voice;
   utter.rate = 0.95;
   utter.pitch = 1;
   utter.volume = 1;
 
   utter.onstart = () => {
     ttsActive = true;
-    // Dừng recognition ngay khi TTS bắt đầu — ngăn micro bắt âm loa
     if (isRecording) {
       clearSilenceCountdown();
       clearTimeout(translateTimer);
@@ -1126,21 +1142,71 @@ function speakText(text, langCode) {
     ttsIndicator.classList.remove('active');
     speakBtn.classList.remove('speaking');
     speakBtn.textContent = '🔊 Phát';
-    // Khởi động lại recognition sau khi loa im hẳn
     if (isRecording) {
-      setTimeout(() => {
-        try { recognition && recognition.start(); } catch(e) {}
-      }, 300);
+      setTimeout(() => { try { recognition && recognition.start(); } catch(e) {} }, 300);
     }
   };
 
   window.speechSynthesis.speak(utter);
 }
 
+function playGoogleAudioFallback(text, lang) {
+  // Chia nhỏ text nếu quá dài (> 150 ký tự)
+  const chunks = text.match(/.{1,150}(?:\s|$)/g) || [text];
+  let currentChunk = 0;
+
+  function playNext() {
+    if (currentChunk >= chunks.length) {
+      ttsActive = false;
+      ttsIndicator.classList.remove('active');
+      speakBtn.classList.remove('speaking');
+      speakBtn.textContent = '🔊 Phát';
+      if (isRecording) {
+        setTimeout(() => { try { recognition && recognition.start(); } catch(e) {} }, 300);
+      }
+      return;
+    }
+    
+    const url = `https://translate.google.com/translate_tts?ie=UTF-8&tl=${lang}&client=tw-ob&q=${encodeURIComponent(chunks[currentChunk])}`;
+    googleAudio = new Audio(url);
+    
+    googleAudio.onplay = () => {
+      ttsActive = true;
+      if (isRecording && currentChunk === 0) {
+        clearSilenceCountdown();
+        clearTimeout(translateTimer);
+        try { recognition && recognition.stop(); } catch(e) {}
+      }
+      ttsIndicator.classList.add('active');
+      speakBtn.classList.add('speaking');
+      speakBtn.textContent = '⏹ Dừng';
+    };
+    
+    googleAudio.onended = () => {
+      currentChunk++;
+      playNext();
+    };
+    
+    googleAudio.onerror = () => {
+      console.warn('Google Audio Fallback failed');
+      currentChunk++;
+      playNext();
+    };
+    
+    googleAudio.play().catch(e => {
+      console.warn('Audio play failed:', e);
+      currentChunk++; playNext();
+    });
+  }
+  
+  playNext();
+}
+
 function speakTranslation() {
   // Nếu đang nói → dừng
-  if (window.speechSynthesis && window.speechSynthesis.speaking) {
-    window.speechSynthesis.cancel();
+  if (ttsActive || (window.speechSynthesis && window.speechSynthesis.speaking)) {
+    stopAllAudio();
+    cancelTTSCountdown();
     return;
   }
   const text = (translatedDisplay.textContent || '').trim();
