@@ -505,13 +505,13 @@
 </div>
 
 <div class="footer">
-  Mở từ <strong>http://localhost:5000</strong> để dùng đầy đủ tính năng ·
-  Speech API yêu cầu Chrome/Edge
+  🌐 Google Translate · 🔄 MyMemory · Speech API yêu cầu Chrome/Edge
 </div>
 
 <script>
 // ─── CONFIG ─────────────────────────────────────────────────
-const LOCAL_SERVER = 'http://localhost:5000';
+const IS_GITHUB_PAGES = location.hostname.endsWith('github.io') || location.protocol === 'https:';
+const LOCAL_SERVER    = 'http://localhost:5000';
 const LANG_NAMES = {
   'vi-VN':'Tiếng Việt','vi':'Tiếng Việt',
   'en-US':'Tiếng Anh','en':'Tiếng Anh',
@@ -545,32 +545,41 @@ let accumulatedFinal = '';
 let translateTimer   = null;
 let serverOnline     = false;
 let lastEngine       = '—';
-let autoTTS          = true;   // tự động đọc bản dịch
-let silenceTimer     = null;   // countdown auto-stop
-let countdownInterval= null;   // interval hiển thị đếm ngược
+let autoTTS          = true;
+let silenceTimer     = null;
+let countdownInterval= null;
 
-const SILENCE_SECONDS = 3;     // số giây im lặng trước khi tự ngừng
+const SILENCE_SECONDS = 3;
 const waveLabel     = document.getElementById('waveLabel');
 const waveCountdown = document.getElementById('waveCountdown');
 
-// ─── SERVER CHECK ────────────────────────────────────────────
-async function checkServer() {
-  // Neu dang mo tu file:// thi khong the ket noi server (CORS)
-  if (location.protocol === 'file:') {
+// ─── ENVIRONMENT DETECTION ───────────────────────────────────
+function initEnvironment() {
+  if (IS_GITHUB_PAGES) {
+    // Chạy trên GitHub Pages → dùng API trực tiếp từ browser
+    serverOnline = false;
+    serverDot.className = 'status-dot online';
+    serverLabel.textContent = 'Sẵn sàng · Google Translate';
+    engineTag.textContent = '🌐 ONLINE';
+  } else if (location.protocol === 'file:') {
     serverOnline = false;
     serverDot.className = 'status-dot offline';
     serverLabel.innerHTML = '⚠️ Mở từ file:// — <a href="http://localhost:5000" style="color:var(--accent)">Click để mở đúng</a>';
-    engineTag.textContent = 'ONLINE ONLY';
-    return;
+    engineTag.textContent = 'FILE://';
+  } else {
+    // localhost → thử kết nối server Python
+    checkServer();
+    setInterval(checkServer, 15000);
   }
-  // Dung AbortController thay vi AbortSignal.timeout() (Edge compat)
+}
+
+// ─── SERVER CHECK (chỉ dùng khi chạy local) ────────────────────
+async function checkServer() {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), 3000);
   try {
     const r = await fetch(`${LOCAL_SERVER}/health`, {
-      signal: ctrl.signal,
-      mode: 'cors',
-      cache: 'no-store'
+      signal: ctrl.signal, mode: 'cors', cache: 'no-store'
     });
     clearTimeout(timer);
     if (r.ok) {
@@ -580,16 +589,13 @@ async function checkServer() {
       engineTag.textContent = 'LOCAL + ONLINE';
       return;
     }
-  } catch(e) {
-    clearTimeout(timer);
-  }
+  } catch(e) { clearTimeout(timer); }
   serverOnline = false;
   serverDot.className = 'status-dot warn';
-  serverLabel.textContent = 'Chỉ dùng MyMemory API';
-  engineTag.textContent = 'ONLINE ONLY';
+  serverLabel.textContent = 'Chỉ dùng Google / MyMemory';
+  engineTag.textContent = '🌐 ONLINE';
 }
-checkServer();
-setInterval(checkServer, 15000);
+initEnvironment();
 
 // ─── LANG LABELS ────────────────────────────────────────────
 function updateLangLabels() {
