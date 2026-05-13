@@ -548,28 +548,27 @@ let lastEngine       = '—';
 let autoTTS          = true;
 let silenceTimer     = null;
 let countdownInterval= null;
-
 const SILENCE_SECONDS = 3;
 const waveLabel     = document.getElementById('waveLabel');
 const waveCountdown = document.getElementById('waveCountdown');
 
-// ─── ENVIRONMENT DETECTION ───────────────────────────────────
+// ─── ENVIRONMENT DETECTION ────────────────────────────────
+function setReady(ok) {
+  serverDot.className = ok ? 'status-dot online' : 'status-dot offline';
+  serverLabel.textContent = ok ? 'Sẵn sàng' : 'Không sẵn sàng';
+  engineTag.textContent = '';
+}
+
 function initEnvironment() {
-  if (IS_GITHUB_PAGES) {
-    // Chạy trên GitHub Pages → dùng API trực tiếp từ browser
-    serverOnline = false;
-    serverDot.className = 'status-dot online';
-    serverLabel.textContent = 'Sẵn sàng · Google Translate';
-    engineTag.textContent = '🌐 ONLINE';
-  } else if (location.protocol === 'file:') {
-    serverOnline = false;
-    serverDot.className = 'status-dot offline';
+  if (location.protocol === 'file:') {
+    setReady(false);
     serverLabel.innerHTML = '⚠️ Mở từ file:// — <a href="http://localhost:5000" style="color:var(--accent)">Click để mở đúng</a>';
-    engineTag.textContent = 'FILE://';
-  } else {
+  } else if (!IS_GITHUB_PAGES) {
     // localhost → thử kết nối server Python
     checkServer();
     setInterval(checkServer, 15000);
+  } else {
+    setReady(true);
   }
 }
 
@@ -584,16 +583,12 @@ async function checkServer() {
     clearTimeout(timer);
     if (r.ok) {
       serverOnline = true;
-      serverDot.className = 'status-dot online';
-      serverLabel.textContent = 'Local server · sẵn sàng';
-      engineTag.textContent = 'LOCAL + ONLINE';
+      setReady(true);
       return;
     }
   } catch(e) { clearTimeout(timer); }
   serverOnline = false;
-  serverDot.className = 'status-dot warn';
-  serverLabel.textContent = 'Chỉ dùng Google / MyMemory';
-  engineTag.textContent = '🌐 ONLINE';
+  setReady(true); // vẫn online qua Google/MyMemory
 }
 initEnvironment();
 
@@ -697,25 +692,27 @@ function updateCountdownUI(n) {
   if (waveLabel) waveLabel.textContent = 'Im lặng...';
 }
 
+let translateFired = false; // theo dõi debounce đã chạy chưa
+
 function stopRecording() {
   clearSilenceCountdown();
+  cancelTTSCountdown();   // hủy countdown TTS nếu đang đếm
   isRecording = false;
   if (recognition) recognition.stop();
   micBtn.textContent = '🎤 Bắt đầu nói';
   micBtn.classList.remove('recording');
   waveIndicator.classList.remove('active');
   sourcePanel.classList.remove('active');
-  // Hủy timer debounce cũ — để tránh gọi translateText 2 lần
-  clearTimeout(translateTimer);
-  translateTimer = null;
-  // Chỉ gọi dịch nếu chưa có bản dịch đúng hiện trên màn hình
+
   const text = accumulatedFinal.trim();
-  const currentTranslation = (translatedDisplay.textContent || '').trim();
-  const isPlaceholder = !currentTranslation
-    || currentTranslation.startsWith('⏳')
-    || currentTranslation.startsWith('❌')
-    || currentTranslation.startsWith('Bản dịch sẽ');
-  if (text && isPlaceholder) translateText(text);
+  if (translateTimer !== null) {
+    // Debounce chưa chạy → hủy và gọi ngay
+    clearTimeout(translateTimer);
+    translateTimer = null;
+    if (text) { translateFired = true; translateText(text); }
+  }
+  // Nếu translateTimer đã null (debounce đã chạy hoặc chưa có text)
+  // → không gọi lại → tránh race condition
 }
 
 recognition && (recognition.onstart = () => {
@@ -753,11 +750,14 @@ recognition && (recognition.onresult = (event) => {
     clearSilenceCountdown();
   }
 
-  // Debounce dich: sau TRANSLATE_DELAY ms khong noi them thi dich
+  // Debounce dịch
   clearTimeout(translateTimer);
   const textToTranslate = accumulatedFinal + (interim ? ' ' + interim : '');
   if (textToTranslate.trim()) {
+    translateFired = false;
     translateTimer = setTimeout(() => {
+      translateTimer = null;  // đánh dấu đã chạy
+      translateFired = true;
       translateText(textToTranslate.trim());
     }, interim ? TRANSLATE_DELAY : 400);
   }
@@ -970,11 +970,10 @@ async function translateText(text) {
   function isStale() { return myId !== translateRequestId; }
   function setResult(translated, engine) {
     if (isStale()) return false;
-    // Loại bỏ: text giống nguồn (không dịch được) hoặc rỗng
     if (!translated || translated.trim().toLowerCase() === text.trim().toLowerCase()) return false;
     translatedDisplay.textContent = translated;
     updateEngine(engine);
-    if (autoTTS) speakText(translated, targetLangSel.value);
+    if (autoTTS) speakTextWithDelay(translated, targetLangSel.value);
     return true;
   }
 
@@ -998,7 +997,7 @@ async function translateText(text) {
             translatedDisplay.innerHTML += `<br><span style="color:var(--yellow);font-size:0.75rem">⚠️ Đang offline</span>`;
           }
           updateEngine(data.engine || 'local');
-          if (autoTTS) speakText(data.translation, targetLangSel.value);
+          if (autoTTS) speakTextWithDelay(data.translation, targetLangSel.value);
           return;
         }
       }
@@ -1061,7 +1060,40 @@ function getTTSLang(code) {
   return map[code] || code;
 }
 
-let ttsActive = false; // cờ ngăn feedback micro ← loa
+let ttsActive = false;   // cờ ngăn feedback micro ← loa
+let ttsCountdownTimer = null; // countdown trước khi phát
+
+function cancelTTSCountdown() {
+  clearTimeout(ttsCountdownTimer);
+  ttsCountdownTimer = null;
+  // Reset nút nếu đang đếm
+  if (speakBtn && speakBtn.textContent.match(/^\d/)) {
+    speakBtn.textContent = '🔊 Phát';
+    speakBtn.classList.remove('speaking');
+  }
+}
+
+// Phát TTS sau delay giây, hiện đếm ngược trên nút
+function speakTextWithDelay(text, langCode, delay = 2) {
+  cancelTTSCountdown();
+  if (!window.speechSynthesis) return;
+
+  let remaining = delay;
+  speakBtn.textContent = remaining + '…';
+  speakBtn.classList.add('speaking');
+
+  function tick() {
+    remaining--;
+    if (remaining <= 0) {
+      speakBtn.textContent = '▶ Đang phát';
+      speakText(text, langCode);
+    } else {
+      speakBtn.textContent = remaining + '…';
+      ttsCountdownTimer = setTimeout(tick, 1000);
+    }
+  }
+  ttsCountdownTimer = setTimeout(tick, 1000);
+}
 
 function speakText(text, langCode) {
   if (!window.speechSynthesis) return;
