@@ -773,15 +773,16 @@ recognition && (recognition.onerror = (event) => {
   if (event.error === 'aborted') return;
 
   if (event.error === 'network') {
-    serverDot.className = 'status-dot warn';
-    serverLabel.textContent = IS_GITHUB_PAGES
-      ? '⚠️ Speech API lỗi mạng — Kiểm tra kết nối internet'
-      : '⚠️ Lỗi mạng Speech API — Mở từ http://localhost:5000';
+    // Lỗi mạng tạm thời — không đổi status 'Sẵn sàng'
+    // Trên GitHub Pages đây thường do Google Speech cần HTTPS — bỏ qua
+    console.warn('Speech API: network error (transient, ignoring)');
     if (isRecording) {
-      isRecording = false;
-      micBtn.classList.remove('recording');
-      micBtn.textContent = '🎤 Bắt đầu nói';
-      waveIndicator.classList.remove('active');
+      // Tự restart sau 1s
+      setTimeout(() => {
+        if (isRecording) {
+          try { recognition.start(); } catch(e) {}
+        }
+      }, 1000);
     }
     return;
   }
@@ -992,10 +993,6 @@ async function translateText(text) {
         const data = await r.json();
         if (data.translation && !isStale()) {
           translatedDisplay.textContent = data.translation;
-          showAutoNouns(detectProperNouns(text, data.translation));
-          if (data.engine === 'local-offline') {
-            translatedDisplay.innerHTML += `<br><span style="color:var(--yellow);font-size:0.75rem">⚠️ Đang offline</span>`;
-          }
           updateEngine(data.engine || 'local');
           if (autoTTS) speakTextWithDelay(data.translation, targetLangSel.value);
           return;
@@ -1016,10 +1013,7 @@ async function translateText(text) {
     const r = await fetch(url, { signal: AbortSignal.timeout(8000) });
     const data = await r.json();
     const translated = data[0].map(item => item[0]).filter(Boolean).join('');
-    if (setResult(translated, 'google-direct')) {
-      showAutoNouns(detectProperNouns(text, translated));
-      return;
-    }
+    if (setResult(translated, 'google-direct')) return;
   } catch(e) { console.warn('Google direct failed:', e); }
 
   // 3) MyMemory backup
