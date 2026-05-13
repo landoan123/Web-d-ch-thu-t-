@@ -705,9 +705,17 @@ function stopRecording() {
   micBtn.classList.remove('recording');
   waveIndicator.classList.remove('active');
   sourcePanel.classList.remove('active');
+  // Hủy timer debounce cũ — để tránh gọi translateText 2 lần
   clearTimeout(translateTimer);
+  translateTimer = null;
+  // Chỉ gọi dịch nếu chưa có bản dịch đúng hiện trên màn hình
   const text = accumulatedFinal.trim();
-  if (text) translateText(text);
+  const currentTranslation = (translatedDisplay.textContent || '').trim();
+  const isPlaceholder = !currentTranslation
+    || currentTranslation.startsWith('⏳')
+    || currentTranslation.startsWith('❌')
+    || currentTranslation.startsWith('Bản dịch sẽ');
+  if (text && isPlaceholder) translateText(text);
 }
 
 recognition && (recognition.onstart = () => {
@@ -762,10 +770,16 @@ recognition && (recognition.onerror = (event) => {
   if (event.error === 'aborted') return;
 
   if (event.error === 'network') {
-    // Khi mở từ file:// → báo dùng localhost
-    serverDot.className = 'status-dot offline';
-    serverLabel.textContent = '⚠️ Lỗi mạng Speech API — Mở từ http://localhost:5000';
-    if (isRecording) { isRecording = false; micBtn.classList.remove('recording'); micBtn.textContent = '🎤 Bắt đầu nói'; waveIndicator.classList.remove('active'); }
+    serverDot.className = 'status-dot warn';
+    serverLabel.textContent = IS_GITHUB_PAGES
+      ? '⚠️ Speech API lỗi mạng — Kiểm tra kết nối internet'
+      : '⚠️ Lỗi mạng Speech API — Mở từ http://localhost:5000';
+    if (isRecording) {
+      isRecording = false;
+      micBtn.classList.remove('recording');
+      micBtn.textContent = '🎤 Bắt đầu nói';
+      waveIndicator.classList.remove('active');
+    }
     return;
   }
   if (event.error === 'not-allowed') {
@@ -939,17 +953,31 @@ function preprocessText(text,srcCode){
 }
 
 
-// ─── TRANSLATION ─────────────────────────────────────────────
+// ─── TRANSLATION ─────────────────────────────────────────────────
+let translateRequestId = 0; // chống race condition
+
 async function translateText(text) {
+  const myId = ++translateRequestId; // mỗi request có ID riêng
   const srcCode = sourceLangSel.value.split('-')[0];
   const tgtCode = targetLangSel.value;
 
-  // Tien xu ly: viet hoa ten rieng Viet truoc khi dich
   text = preprocessText(text, srcCode);
+
+  // Helper: chỉ hiển thị nếu request này vẫn là mới nhất
+  function isStale() { return myId !== translateRequestId; }
+  function setResult(translated, engine) {
+    if (isStale()) return false;
+    // Loại bỏ: text giống nguồn (không dịch được) hoặc rỗng
+    if (!translated || translated.trim().toLowerCase() === text.trim().toLowerCase()) return false;
+    translatedDisplay.textContent = translated;
+    updateEngine(engine);
+    if (autoTTS) speakText(translated, targetLangSel.value);
+    return true;
+  }
 
   translatedDisplay.innerHTML = '<span style="color:var(--text2)">⏳ Đang dịch...</span>';
 
-  // 1) Qua local server (server sẽ tự gọi Google → MyMemory → dict)
+  // 1) Local server (chỉ khi chạy localhost)
   if (serverOnline) {
     try {
       const r = await fetch(`${LOCAL_SERVER}/translate`, {
@@ -958,14 +986,13 @@ async function translateText(text) {
         body: JSON.stringify({ text, source: srcCode, target: tgtCode }),
         signal: AbortSignal.timeout(8000)
       });
-      console.log('[DEBUG] text sent to server:', JSON.stringify(text));
       if (r.ok) {
         const data = await r.json();
-        if (data.translation) {
+        if (data.translation && !isStale()) {
           translatedDisplay.textContent = data.translation;
           showAutoNouns(detectProperNouns(text, data.translation));
           if (data.engine === 'local-offline') {
-            translatedDisplay.innerHTML += `<br><span style="color:var(--yellow);font-size:0.75rem">⚠️ Đang offline — dịch từ điển cục bộ</span>`;
+            translatedDisplay.innerHTML += `<br><span style="color:var(--yellow);font-size:0.75rem">⚠️ Đang offline</span>`;
           }
           updateEngine(data.engine || 'local');
           if (autoTTS) speakText(data.translation, targetLangSel.value);
@@ -973,14 +1000,15 @@ async function translateText(text) {
         }
       }
     } catch(e) {
-      console.warn('Server error:', e);
-      serverOnline = false;
-      serverDot.className = 'status-dot warn';
-      serverLabel.textContent = 'Server offline — dùng API trực tiếp';
+      if (!isStale()) {
+        serverOnline = false;
+        serverDot.className = 'status-dot warn';
+        serverLabel.textContent = 'Server offline — dùng API trực tiếp';
+      }
     }
   }
 
-  // 2) Gọi Google Translate trực tiếp từ browser (khi server tắt)
+  // 2) Google Translate trực tiếp từ browser
   try {
     const url = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=${srcCode}&tl=${tgtCode}&dt=t&q=${encodeURIComponent(text)}`;
     const r = await fetch(url, { signal: AbortSignal.timeout(8000) });
